@@ -1,6 +1,0 @@
-node_modules/
-temp/
-download_config.ini
-dist/
-*.zip
-*secret.txt
