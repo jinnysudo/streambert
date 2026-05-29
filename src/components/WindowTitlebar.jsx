@@ -30,13 +30,7 @@ export default function WindowTitlebar() {
 
   const minimize = () => window.electron?.windowMinimize();
   const toggleMaximize = () => window.electron?.windowToggleMaximize();
-  const close = () => {
-    window.dispatchEvent(
-      new CustomEvent("streambert:logout-request", {
-        detail: { quit: true, source: "titlebar" },
-      }),
-    );
-  };
+  const close = () => window.electron?.windowClose();
 
   return (
     <div
