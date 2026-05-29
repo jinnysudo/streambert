@@ -33,7 +33,6 @@ export const BACKUP_KEYS = [
   "downloaderFolder",
   // Misc settings
   "invidiousBase",
-  "autoCheckUpdates",
   // Search history
   "searchHistory",
   // Appearance & behaviour

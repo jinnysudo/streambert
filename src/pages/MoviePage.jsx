@@ -92,6 +92,12 @@ export default function MoviePage({
   const sourceRef = useRef(null);
   const playerWrapRef = useRef(null);
   const webviewRef = useRef(null);
+  const isWebRuntime =
+    typeof window !== "undefined" && window.electron?.runtime === "web";
+  const availableSources = useMemo(() => {
+    if (!isWebRuntime) return PLAYER_SOURCES;
+    return PLAYER_SOURCES.filter((s) => s.id === "videasy");
+  }, [isWebRuntime]);
   // Always-current refs for interval callbacks, avoids stale closures without restarting the interval
   const saveProgressRef = useRef(saveProgress);
   saveProgressRef.current = saveProgress;
@@ -115,6 +121,14 @@ export default function MoviePage({
     () => isAnimeContent(item, details),
     [item.id, details],
   );
+
+  useEffect(() => {
+    if (!isWebRuntime) return;
+    if (availableSources.some((s) => s.id === playerSource)) return;
+    const fallback = availableSources[0]?.id || NON_ANIME_DEFAULT_SOURCE;
+    setPlayerSource(fallback);
+    storage.set("playerSource", fallback);
+  }, [isWebRuntime, availableSources, playerSource]);
   const [downloaderFolder, setDownloaderFolder] = useState(
     () => storage.get("downloaderFolder") || "",
   );
@@ -292,7 +306,7 @@ export default function MoviePage({
 
   // Resolve AllManga movie URL via main-process IPC
   useEffect(() => {
-    if (!playing || !sourceIsAsync(playerSource)) return;
+    if (isWebRuntime || !playing || !sourceIsAsync(playerSource)) return;
     if (resolvedPlayerUrl || resolvingUrl) return;
     setResolvingUrl(true);
     setResolveError(null);
@@ -340,7 +354,7 @@ export default function MoviePage({
     return () => {
       mounted = false;
     };
-  }, [playing, playerSource, dubMode]);
+  }, [playing, playerSource, dubMode, isWebRuntime]);
 
   useEffect(() => {
     if (!window.electron) return;
@@ -418,7 +432,7 @@ export default function MoviePage({
 
   // Attach webview load events so we know when the new source has painted
   useEffect(() => {
-    if (!playing) return;
+    if (!playing || isWebRuntime) return;
     const wv = webviewRef.current;
     if (!wv) return;
     const done = () => setWebviewLoading(false);
@@ -428,11 +442,12 @@ export default function MoviePage({
       wv.removeEventListener("did-finish-load", done);
       wv.removeEventListener("did-fail-load", done);
     };
-  }, [playing, playerSource, item.id]);
+  }, [playing, playerSource, item.id, isWebRuntime]);
 
   // ── Auto-track progress + auto-watched every 5s ──────────────────────────
   useEffect(() => {
-    if (!playing || !sourceSupportsProgress(playerSource)) return;
+    if (isWebRuntime || !playing || !sourceSupportsProgress(playerSource))
+      return;
     let interval = null;
     const timer = setTimeout(() => {
       interval = setInterval(async () => {
@@ -535,7 +550,14 @@ export default function MoviePage({
       clearTimeout(timer);
       clearInterval(interval);
     };
-  }, [playing, progressKey, watchedThreshold, playerSource, progressViaFrames]);
+  }, [
+    playing,
+    progressKey,
+    watchedThreshold,
+    playerSource,
+    progressViaFrames,
+    isWebRuntime,
+  ]);
 
   const handlePlay = useCallback(() => {
     setM3u8Url(null);
@@ -895,31 +917,59 @@ export default function MoviePage({
                 </button>
               </div>
             )}
-            <webview
-              ref={webviewRef}
-              src={
-                pipOpen
-                  ? "about:blank"
-                  : sourceIsAsync(playerSource)
+            {isWebRuntime ? (
+              <iframe
+                ref={webviewRef}
+                src={
+                  sourceIsAsync(playerSource)
                     ? resolvedPlayerUrl || "about:blank"
                     : getSourceUrl(playerSource, "movie", item.id, null, null)
-              }
-              partition="persist:player"
-              allowpopups="false"
-              sandbox="allow-scripts allow-same-origin allow-forms"
-              style={{
-                position: "absolute",
-                inset: 0,
-                width: "100%",
-                height: "100%",
-                border: "none",
-                visibility:
-                  webviewLoading ||
-                  (sourceIsAsync(playerSource) && !resolvedPlayerUrl)
-                    ? "hidden"
-                    : "visible",
-              }}
-            />
+                }
+                title={`${title} player`}
+                allow="autoplay; fullscreen; picture-in-picture"
+                allowFullScreen
+                onLoad={() => setWebviewLoading(false)}
+                onError={() => setWebviewLoading(false)}
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  width: "100%",
+                  height: "100%",
+                  border: "none",
+                  visibility:
+                    webviewLoading ||
+                    (sourceIsAsync(playerSource) && !resolvedPlayerUrl)
+                      ? "hidden"
+                      : "visible",
+                }}
+              />
+            ) : (
+              <webview
+                ref={webviewRef}
+                src={
+                  pipOpen
+                    ? "about:blank"
+                    : sourceIsAsync(playerSource)
+                      ? resolvedPlayerUrl || "about:blank"
+                      : getSourceUrl(playerSource, "movie", item.id, null, null)
+                }
+                partition="persist:player"
+                allowpopups="false"
+                sandbox="allow-scripts allow-same-origin allow-forms"
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  width: "100%",
+                  height: "100%",
+                  border: "none",
+                  visibility:
+                    webviewLoading ||
+                    (sourceIsAsync(playerSource) && !resolvedPlayerUrl)
+                      ? "hidden"
+                      : "visible",
+                }}
+              />
+            )}
             {/* Left-side overlay button group, flex row, no fixed px offsets */}
             <div className="player-overlay-group">
               <button
@@ -934,7 +984,7 @@ export default function MoviePage({
                 title="Change source"
               >
                 <SourceIcon />
-                {PLAYER_SOURCES.find((s) => s.id === playerSource)?.label ??
+                {availableSources.find((s) => s.id === playerSource)?.label ??
                   "Source"}
               </button>
               {/* Sub/Dub toggle, only for AllManga */}
@@ -1002,7 +1052,7 @@ export default function MoviePage({
                 style={{ top: menuPos.top, left: menuPos.left }}
                 onClick={(e) => e.stopPropagation()}
               >
-                {PLAYER_SOURCES.map((src) => (
+                    {availableSources.map((src) => (
                   <button
                     key={src.id}
                     className={

@@ -421,6 +421,12 @@ export default function TVPage({
   const sourceRef = useRef(null);
   const playerWrapRef = useRef(null);
   const webviewRef = useRef(null);
+  const isWebRuntime =
+    typeof window !== "undefined" && window.electron?.runtime === "web";
+  const availableSources = useMemo(() => {
+    if (!isWebRuntime) return PLAYER_SOURCES;
+    return PLAYER_SOURCES.filter((s) => s.id === "videasy");
+  }, [isWebRuntime]);
   // Always-current refs for interval callbacks, avoids stale closures without restarting the interval
   const saveProgressRef = useRef(saveProgress);
   saveProgressRef.current = saveProgress;
@@ -432,6 +438,14 @@ export default function TVPage({
     () => isAnimeContent(item, details),
     [item.id, details],
   );
+
+  useEffect(() => {
+    if (!isWebRuntime) return;
+    if (availableSources.some((s) => s.id === playerSource)) return;
+    const fallback = availableSources[0]?.id || NON_ANIME_DEFAULT_SOURCE;
+    setPlayerSource(fallback);
+    storage.set("playerSource", fallback);
+  }, [isWebRuntime, availableSources, playerSource]);
 
   const [downloaderFolder, setDownloaderFolder] = useState(
     () => storage.get("downloaderFolder") || "",
@@ -644,7 +658,7 @@ export default function TVPage({
 
   // Resolve allmanga episode URL via main-process IPC (GraphQL, no CORS)
   useEffect(() => {
-    if (!playing || !selectedEp || !isAsync) return;
+    if (isWebRuntime || !playing || !selectedEp || !isAsync) return;
     if (resolvedPlayerUrl || resolvingUrl) return;
     setResolvingUrl(true);
     setResolveError(null);
@@ -694,7 +708,14 @@ export default function TVPage({
     return () => {
       mounted = false;
     };
-  }, [playing, selectedEp, playerSource, selectedSeason, dubMode]);
+  }, [
+    playing,
+    selectedEp,
+    playerSource,
+    selectedSeason,
+    dubMode,
+    isWebRuntime,
+  ]);
 
   useEffect(() => {
     if (!window.electron) return;
@@ -1039,7 +1060,7 @@ export default function TVPage({
   // Attach webview load events so we know when the new source has painted.
   // Also poll for video duration so AniSkip markers appear without waiting for the 5s progress tick.
   useEffect(() => {
-    if (!playing) return;
+    if (!playing || isWebRuntime) return;
     const wv = webviewRef.current;
     if (!wv) return;
     const done = () => setWebviewLoading(false);
@@ -1071,7 +1092,7 @@ export default function TVPage({
       wv.removeEventListener("did-fail-load", done);
       clearInterval(pollDuration);
     };
-  }, [playing, playerSource, item.id, selectedEp?.episode_number]);
+  }, [playing, playerSource, item.id, selectedEp?.episode_number, isWebRuntime]);
 
   // ── AniSkip: fetch timings when episode changes ───────────────────────────
   useEffect(() => {
@@ -1101,6 +1122,7 @@ export default function TVPage({
   // ── AniSkip: auto-skip or show manual prompt ─────────────────
   // ── AniSkip: manual skip handler ─────────────────────────────────────────
   const handleManualSkip = useCallback(async () => {
+    if (isWebRuntime) return;
     if (!skipPrompt || !skipTimings?.[skipPrompt]) return;
     const rawEnd = skipTimings[skipPrompt].endTime;
     const endTime = Number(rawEnd);
@@ -1113,11 +1135,12 @@ export default function TVPage({
       );
     } catch {}
     setSkipPrompt(null);
-  }, [skipPrompt, skipTimings]);
+  }, [skipPrompt, skipTimings, isWebRuntime]);
 
   // Use webview before-input-event so Enter reaches main-ui before the webview
   // handles it (avoids the webview's Space/Enter play-pause intercepting it).
   useEffect(() => {
+    if (isWebRuntime) return;
     if (!skipPrompt) return;
     const wv = webviewRef.current;
     if (!wv) return;
@@ -1128,7 +1151,7 @@ export default function TVPage({
     };
     wv.addEventListener("before-input-event", handler);
     return () => wv.removeEventListener("before-input-event", handler);
-  }, [skipPrompt, handleManualSkip]);
+  }, [skipPrompt, handleManualSkip, isWebRuntime]);
 
   // Unified progress/skip timing tick for Allmanga and other sources.
   // Skip detection runs every tick, progress is saved every 5th tick (5s).
@@ -1140,6 +1163,7 @@ export default function TVPage({
       playerSource === "allmanga";
 
     if (!aniSkipActive) setSkipPrompt(null);
+    if (isWebRuntime) return;
     if (!playing || !currentProgressKey) return;
 
     const TICK = aniSkipActive ? 1000 : 5000;
@@ -1290,10 +1314,12 @@ export default function TVPage({
     currentProgressKey,
     watchedThreshold,
     progressViaFrames,
+    isWebRuntime,
   ]);
 
   // Skip backward/forward by N seconds via webview JS injection
   const seekBy = useCallback(async (seconds) => {
+    if (isWebRuntime) return;
     try {
       const wv = webviewRef.current;
       if (!wv) return;
@@ -1304,9 +1330,10 @@ export default function TVPage({
         })()
       `);
     } catch {}
-  }, []);
+  }, [isWebRuntime]);
 
   useEffect(() => {
+    if (isWebRuntime) return;
     const wv = webviewRef.current;
     if (!wv || !playing || playerSource !== "allmanga") return;
 
@@ -1332,7 +1359,7 @@ export default function TVPage({
         `);
       } catch {}
     };
-  }, [playing, playerSource]);
+  }, [playing, playerSource, isWebRuntime]);
 
   const playEpisode = useCallback(
     (ep) => {
@@ -1665,12 +1692,11 @@ export default function TVPage({
                     </button>
                   </div>
                 )}
-                <webview
-                  ref={webviewRef}
-                  src={
-                    pipOpen
-                      ? "about:blank"
-                      : isAsync
+                {isWebRuntime ? (
+                  <iframe
+                    ref={webviewRef}
+                    src={
+                      isAsync
                         ? resolvedPlayerUrl || "about:blank"
                         : getSourceUrl(
                             playerSource,
@@ -1679,26 +1705,64 @@ export default function TVPage({
                             playerEp.season,
                             playerEp.episode,
                           )
-                  }
-                  partition="persist:player"
-                  allowpopups="false"
-                  sandbox="allow-scripts allow-same-origin allow-forms"
-                  style={{
-                    position: "absolute",
-                    inset: 0,
-                    width: "100%",
-                    height: "100%",
-                    border: "none",
-                    outline: "none",
-                    boxShadow: "none",
-                    background: "black",
-                    visibility:
-                      webviewLoading || (isAsync && !resolvedPlayerUrl)
-                        ? "hidden"
-                        : "visible",
-                  }}
-                  tabIndex={-1}
-                />
+                    }
+                    title={`${title} player`}
+                    allow="autoplay; fullscreen; picture-in-picture"
+                    allowFullScreen
+                    onLoad={() => setWebviewLoading(false)}
+                    onError={() => setWebviewLoading(false)}
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      width: "100%",
+                      height: "100%",
+                      border: "none",
+                      outline: "none",
+                      boxShadow: "none",
+                      background: "black",
+                      visibility:
+                        webviewLoading || (isAsync && !resolvedPlayerUrl)
+                          ? "hidden"
+                          : "visible",
+                    }}
+                    tabIndex={-1}
+                  />
+                ) : (
+                  <webview
+                    ref={webviewRef}
+                    src={
+                      pipOpen
+                        ? "about:blank"
+                        : isAsync
+                          ? resolvedPlayerUrl || "about:blank"
+                          : getSourceUrl(
+                              playerSource,
+                              "tv",
+                              item.id,
+                              playerEp.season,
+                              playerEp.episode,
+                            )
+                    }
+                    partition="persist:player"
+                    allowpopups="false"
+                    sandbox="allow-scripts allow-same-origin allow-forms"
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      width: "100%",
+                      height: "100%",
+                      border: "none",
+                      outline: "none",
+                      boxShadow: "none",
+                      background: "black",
+                      visibility:
+                        webviewLoading || (isAsync && !resolvedPlayerUrl)
+                          ? "hidden"
+                          : "visible",
+                    }}
+                    tabIndex={-1}
+                  />
+                )}
                 {/* Left-side overlay button group, flex row, no fixed px offsets */}
                 <div className="player-overlay-group">
                   <button
@@ -1713,7 +1777,8 @@ export default function TVPage({
                     title="Change source"
                   >
                     <SourceIcon />
-                    {PLAYER_SOURCES.find((s) => s.id === playerSource)?.label ??
+                    {availableSources.find((s) => s.id === playerSource)
+                      ?.label ??
                       "Source"}
                   </button>
                   {/* Sub/Dub toggle, only for AllManga */}
@@ -1791,7 +1856,7 @@ export default function TVPage({
                     style={{ top: menuPos.top, left: menuPos.left }}
                     onClick={(e) => e.stopPropagation()}
                   >
-                    {PLAYER_SOURCES.map((src) => (
+                    {availableSources.map((src) => (
                       <button
                         key={src.id}
                         className={

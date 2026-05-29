@@ -1,6 +1,120 @@
 // localStorage-based persistence (works in both Vite dev and prod)
 
+import {
+  doc,
+  getDoc,
+  serverTimestamp,
+  setDoc,
+} from "firebase/firestore";
+import { db } from "./firebase";
+
 const PREFIX = "streambert_";
+const WEB_SECURE_PREFIX = "secure_";
+const HARDCODED_TMDB_API_KEY =
+  "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI5MjIwMGRhZTM1ZjE1NmY3YmJhN2QwOTFmMzgwOTI1ZiIsIm5iZiI6MTcyMjM4MjM1MS42MTIsInN1YiI6IjY2YTk3ODBmZDFiNTE4MjU5ZGUwYzAzOSIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.rIPCgnUEViw6esLXsh1y9w3roo1hodond0KdUCcqey4";
+const CLOUD_SYNC_FLAG = "streambert_cloud_sync_enabled";
+const DEVICE_ID_KEY = "streambert_device_id";
+const CLOUD_COLLECTION = "clientState";
+
+let cloudSyncEnabled = false;
+let cloudSyncTimer = null;
+let cloudSyncInFlight = null;
+
+function getDeviceId() {
+  try {
+    const existing = localStorage.getItem(DEVICE_ID_KEY);
+    if (existing) return existing;
+    const generated =
+      typeof crypto !== "undefined" && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `device_${Math.random().toString(36).slice(2, 12)}`;
+    localStorage.setItem(DEVICE_ID_KEY, generated);
+    return generated;
+  } catch {
+    return `device_${Math.random().toString(36).slice(2, 12)}`;
+  }
+}
+
+function cloudDocRef() {
+  return doc(db, CLOUD_COLLECTION, getDeviceId());
+}
+
+function readAllLocalStreambertData() {
+  const out = {};
+  try {
+    for (const k of Object.keys(localStorage)) {
+      if (!k.startsWith(PREFIX)) continue;
+      const raw = localStorage.getItem(k);
+      const shortKey = k.slice(PREFIX.length);
+      out[shortKey] = raw ? JSON.parse(raw) : null;
+    }
+  } catch {}
+  return out;
+}
+
+function writeAllLocalStreambertData(data) {
+  if (!data || typeof data !== "object") return;
+  try {
+    Object.keys(localStorage)
+      .filter((k) => k.startsWith(PREFIX))
+      .forEach((k) => localStorage.removeItem(k));
+
+    for (const [key, value] of Object.entries(data)) {
+      localStorage.setItem(PREFIX + key, JSON.stringify(value));
+    }
+  } catch {}
+}
+
+async function pushCloudSnapshot() {
+  if (!cloudSyncEnabled) return;
+  const payload = {
+    data: readAllLocalStreambertData(),
+    updatedAt: serverTimestamp(),
+  };
+  await setDoc(cloudDocRef(), payload, { merge: true });
+}
+
+function scheduleCloudSync() {
+  if (!cloudSyncEnabled) return;
+  if (cloudSyncTimer) clearTimeout(cloudSyncTimer);
+  cloudSyncTimer = setTimeout(() => {
+    cloudSyncTimer = null;
+    cloudSyncInFlight = pushCloudSnapshot().catch(() => null);
+  }, 220);
+}
+
+export async function initializeCloudStorageSync() {
+  try {
+    cloudSyncEnabled = true;
+    const snap = await getDoc(cloudDocRef());
+    if (snap.exists()) {
+      const remoteData = snap.data()?.data;
+      if (remoteData && typeof remoteData === "object") {
+        writeAllLocalStreambertData(remoteData);
+      }
+    } else {
+      await pushCloudSnapshot();
+    }
+    localStorage.setItem(CLOUD_SYNC_FLAG, "1");
+  } catch {
+    cloudSyncEnabled = false;
+    try {
+      localStorage.setItem(CLOUD_SYNC_FLAG, "0");
+    } catch {}
+  }
+}
+
+export async function flushCloudStorageSync() {
+  if (cloudSyncTimer) {
+    clearTimeout(cloudSyncTimer);
+    cloudSyncTimer = null;
+  }
+  if (!cloudSyncEnabled) return;
+  try {
+    if (cloudSyncInFlight) await cloudSyncInFlight;
+    await pushCloudSnapshot();
+  } catch {}
+}
 
 export const storage = {
   get(key) {
@@ -15,11 +129,13 @@ export const storage = {
     try {
       localStorage.setItem(PREFIX + key, JSON.stringify(value));
     } catch {}
+    scheduleCloudSync();
   },
   remove(key) {
     try {
       localStorage.removeItem(PREFIX + key);
     } catch {}
+    scheduleCloudSync();
   },
   // Remove all streambert_ keys (used by reset)
   clearAll() {
@@ -28,6 +144,7 @@ export const storage = {
         .filter((k) => k.startsWith(PREFIX))
         .forEach((k) => localStorage.removeItem(k));
     } catch {}
+    scheduleCloudSync();
   },
 };
 
@@ -51,7 +168,6 @@ export const STORAGE_KEYS = {
   HOME_ROW_ORDER: "homeRowOrder",
   HOME_ROW_VISIBLE: "homeRowVisible",
   HOME_VIEW_MODE: "homeViewMode",
-  AUTO_CHECK_UPDATES: "autoCheckUpdates",
   INVIDIOUS_BASE: "invidiousBase",
   // Subtitle settings
   SUBTITLE_ENABLED: "subtitleDownload",
@@ -80,6 +196,7 @@ export const STORAGE_KEYS = {
   DL_SHOW_UNTRACKED: "dlShowUntracked",
   // Cache for new-episode startup check
   EPISODE_RELEASE_CACHE: "episodeReleaseCache",
+  CURRENT_MEDIA_STATE: "currentMediaState",
 };
 
 export const getApiKey = () => storage.get(STORAGE_KEYS.API_KEY);
@@ -116,14 +233,28 @@ const _isElectronSecure =
 export const secureStorage = {
   /** Read an encrypted value. Returns null if not set. */
   async get(key) {
-    if (!_isElectronSecure) return null;
-    return window.electron.secureGet(key);
+    if (_isElectronSecure) return window.electron.secureGet(key);
+    try {
+      const raw = localStorage.getItem(PREFIX + WEB_SECURE_PREFIX + key);
+      if (raw !== null) return JSON.parse(raw);
+    } catch {}
+    if (key === STORAGE_KEYS.API_KEY) return HARDCODED_TMDB_API_KEY;
+    return null;
   },
 
   /** Write an encrypted value. Pass null/empty to delete. */
   async set(key, value) {
-    if (!_isElectronSecure) return;
-    return window.electron.secureSet(key, value ?? "");
+    if (_isElectronSecure) return window.electron.secureSet(key, value ?? "");
+    try {
+      if (value === null || value === undefined || value === "") {
+        localStorage.removeItem(PREFIX + WEB_SECURE_PREFIX + key);
+      } else {
+        localStorage.setItem(
+          PREFIX + WEB_SECURE_PREFIX + key,
+          JSON.stringify(value),
+        );
+      }
+    } catch {}
   },
 };
 

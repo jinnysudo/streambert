@@ -98,6 +98,14 @@ export default function Sidebar({
     setTooltip(null);
   };
 
+  const logoutAndQuit = () => {
+    window.dispatchEvent(
+      new CustomEvent("streambert:logout-request", {
+        detail: { quit: true, source: "sidebar" },
+      }),
+    );
+  };
+
   return (
     <div className="sidebar">
       <div
@@ -226,7 +234,7 @@ export default function Sidebar({
         />
         <button
           className="sidebar-btn"
-          onClick={() => window.electron?.quitApp?.()}
+          onClick={logoutAndQuit}
           title="Quit App"
           style={{ color: "#e53e3e", marginTop: 4 }}
         >

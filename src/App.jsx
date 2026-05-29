@@ -15,12 +15,18 @@ import { applyAccentColor } from "./utils/appearance";
 import { collectBackupData } from "./utils/backup";
 import { tmdbFetch, setApiErrorHandlers } from "./utils/api";
 import { clearAppCaches } from "./utils/storage";
+import PasswordGate from "./components/PasswordGate";
+import AdminPage from "./pages/AdminPage";
+import {
+  startSessionHeartbeat,
+  updateDeviceSession,
+  verifyAccessPassword,
+} from "./utils/accessControl";
 
 import Sidebar from "./components/Sidebar";
 import SearchModal from "./components/SearchModal";
 import SetupScreen from "./components/SetupScreen";
 import CloseConfirmModal from "./components/CloseConfirmModal";
-import UpdateModal from "./components/UpdateModal";
 
 // Lazy-loaded pages: each chunk is only downloaded when the user first visits
 const HomePage = lazy(() => import("./pages/HomePage"));
@@ -29,7 +35,6 @@ const TVPage = lazy(() => import("./pages/TVPage"));
 const LibraryPage = lazy(() => import("./pages/LibraryPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 const DownloadsPage = lazy(() => import("./pages/DownloadsPage"));
-import { checkForUpdates } from "./utils/updates";
 
 export default function App() {
   // apiKey loaded async from secure storage (OS keychain)
@@ -37,8 +42,15 @@ export default function App() {
   const [apiKeyLoaded, setApiKeyLoaded] = useState(false);
   const [skipped, setSkipped] = useState(false);
   const [apiKeyStatus, setApiKeyStatus] = useState("checking"); // 'checking' | 'ok' | 'invalid_token' | 'unreachable'
-  const [page, setPage] = useState(() => storage.get("startPage") || "home");
-  const [selected, setSelected] = useState(null);
+  const [page, setPage] = useState(
+    () =>
+      storage.get(STORAGE_KEYS.CURRENT_MEDIA_STATE)?.page ||
+      storage.get("startPage") ||
+      "home",
+  );
+  const [selected, setSelected] = useState(
+    () => storage.get(STORAGE_KEYS.CURRENT_MEDIA_STATE)?.selected || null,
+  );
   const [showSearch, setShowSearch] = useState(false);
   const [dlSearchOpen, setDlSearchOpen] = useState(false);
   const [librarySort, setLibrarySort] = useState(
@@ -46,6 +58,17 @@ export default function App() {
   );
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [platform, setPlatform] = useState(null);
+  const isAdminRoute = useMemo(
+    () => window.location.pathname.startsWith("/admin"),
+    [],
+  );
+  const sessionFlagKey = isAdminRoute
+    ? "streambert_admin_access"
+    : "streambert_site_access";
+  const [gateReady, setGateReady] = useState(false);
+  const [gateAllowed, setGateAllowed] = useState(false);
+  const [gateBusy, setGateBusy] = useState(false);
+  const [gateError, setGateError] = useState("");
 
   // Navigation history stack for Ctrl+Z back navigation
   const [navStack, setNavStack] = useState([]);
@@ -59,8 +82,6 @@ export default function App() {
   const [history, setHistory] = useState(() => storage.get("history") || []);
   const [watched, setWatched] = useState(() => storage.get("watched") || {});
   const [toast, setToast] = useState(null);
-  const [updateBanner, setUpdateBanner] = useState(null);
-  const [showUpdateModal, setShowUpdateModal] = useState(false);
   // null | "checking" | { entries: object[] } | "none"
   const [episodeCheckStatus, setEpisodeCheckStatus] = useState(null);
   const episodeDismissTimerRef = useRef(null);
@@ -71,6 +92,70 @@ export default function App() {
   const [offline, setOffline] = useState(() => !navigator.onLine);
 
   // ── Scheduled backup: run on startup if due ─────────────────────────────────
+  useEffect(() => {
+    const hasSession = sessionStorage.getItem(sessionFlagKey) === "1";
+    setGateAllowed(hasSession);
+    setGateReady(true);
+  }, [sessionFlagKey]);
+
+  useEffect(() => {
+    if (!gateAllowed) return;
+    return startSessionHeartbeat({ role: isAdminRoute ? "admin" : "site" });
+  }, [gateAllowed, isAdminRoute]);
+
+  useEffect(() => {
+    storage.set(STORAGE_KEYS.CURRENT_MEDIA_STATE, { page, selected });
+  }, [page, selected]);
+
+  useEffect(() => {
+    const handleLogoutRequest = (e) => {
+      const shouldQuit = !!e?.detail?.quit;
+      try {
+        sessionStorage.removeItem("streambert_site_access");
+        sessionStorage.removeItem("streambert_admin_access");
+      } catch {}
+      setGateAllowed(false);
+      setGateError("");
+      if (shouldQuit) {
+        if (window.electron?.quitApp) window.electron.quitApp();
+        else if (window.electron?.windowClose) window.electron.windowClose();
+      }
+    };
+
+    window.addEventListener("streambert:logout-request", handleLogoutRequest);
+    return () =>
+      window.removeEventListener(
+        "streambert:logout-request",
+        handleLogoutRequest,
+      );
+  }, []);
+
+  const handleGateSubmit = useCallback(
+    async (password) => {
+      setGateBusy(true);
+      setGateError("");
+      try {
+        const ok = await verifyAccessPassword(password, { admin: isAdminRoute });
+        if (!ok) {
+          setGateError("Wrong password.");
+          return;
+        }
+        sessionStorage.setItem(sessionFlagKey, "1");
+        setGateAllowed(true);
+        try {
+          await updateDeviceSession({ role: isAdminRoute ? "admin" : "site" });
+        } catch {
+          // Access should still be granted even if telemetry write is blocked.
+        }
+      } catch {
+        setGateError("Unable to verify password with Firebase.");
+      } finally {
+        setGateBusy(false);
+      }
+    },
+    [isAdminRoute, sessionFlagKey],
+  );
+
   useEffect(() => {
     if (!window.electron?.onScheduledBackupRequested) return;
     const handler = window.electron.onScheduledBackupRequested(async () => {
@@ -98,17 +183,6 @@ export default function App() {
       }
       localStorage.setItem("streambert_lastVersion", version);
     });
-  }, []);
-
-  // ── Startup update check ─────────────────────────────────────────────────
-  useEffect(() => {
-    if (!storage.get("autoCheckUpdates")) return;
-    checkForUpdates()
-      .then((r) => {
-        if (r.hasUpdate) setUpdateBanner(r);
-      })
-      .catch(() => {}); // silently ignore network errors on startup
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ── Startup: new-episode notification check ──────────────────────────────
@@ -830,6 +904,36 @@ export default function App() {
     [navigate],
   );
 
+  if (!gateReady) return null;
+  if (!gateAllowed) {
+    return (
+      <PasswordGate
+        title={isAdminRoute ? "Admin Access" : "Protected Access"}
+        subtitle={
+          isAdminRoute
+            ? "Enter the admin password to open /admin"
+            : "Enter the site password to continue"
+        }
+        buttonLabel={isAdminRoute ? "Open Admin" : "Enter"}
+        onSubmit={handleGateSubmit}
+        error={gateError}
+        loading={gateBusy}
+      />
+    );
+  }
+
+  if (isAdminRoute) {
+    return (
+      <AdminPage
+        onLogout={() => {
+          sessionStorage.removeItem(sessionFlagKey);
+          setGateAllowed(false);
+          setGateError("");
+        }}
+      />
+    );
+  }
+
   if (!apiKeyLoaded) return null; // wait for secure storage to resolve
   if (!apiKey && !skipped)
     return <SetupScreen onSave={saveApiKey} onSkip={() => setSkipped(true)} />;
@@ -1010,67 +1114,6 @@ export default function App() {
             onSelect={handleSelectResult}
             onClose={() => setShowSearch(false)}
             offline={offline}
-          />
-        )}
-        {updateBanner && (
-          <div
-            style={{
-              position: "fixed",
-              top: hasCustomTitlebar ? 32 : 0,
-              left: 0,
-              right: 0,
-              zIndex: 9999,
-              background: "rgba(229,9,20,0.92)",
-              backdropFilter: "blur(8px)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 16,
-              padding: "10px 24px",
-              boxShadow: "0 2px 16px rgba(0,0,0,0.4)",
-              fontSize: 14,
-              fontWeight: 500,
-              color: "#fff",
-            }}
-          >
-            <span>🎉 Streambert v{updateBanner.latest} is available!</span>
-            <button
-              onClick={() => setShowUpdateModal(true)}
-              style={{
-                color: "#fff",
-                fontWeight: 700,
-                background: "rgba(255,255,255,0.18)",
-                border: "1px solid rgba(255,255,255,0.4)",
-                borderRadius: 6,
-                padding: "4px 12px",
-                fontSize: 13,
-                cursor: "pointer",
-              }}
-            >
-              Install Update
-            </button>
-            <button
-              onClick={() => setUpdateBanner(null)}
-              style={{
-                background: "transparent",
-                border: "none",
-                color: "rgba(255,255,255,0.7)",
-                cursor: "pointer",
-                fontSize: 18,
-                lineHeight: 1,
-                padding: "0 4px",
-              }}
-              aria-label="Dismiss"
-            >
-              ×
-            </button>
-          </div>
-        )}
-        {showUpdateModal && updateBanner && (
-          <UpdateModal
-            updateInfo={updateBanner}
-            activeDownloads={activeDownloadCount}
-            onClose={() => setShowUpdateModal(false)}
           />
         )}
         {toast && <div className="toast">{toast}</div>}
@@ -1265,6 +1308,10 @@ export default function App() {
             count={closeConfirm.count}
             onConfirm={() => {
               setCloseConfirm(null);
+              try {
+                sessionStorage.removeItem("streambert_site_access");
+                sessionStorage.removeItem("streambert_admin_access");
+              } catch {}
               window.electron.respondClose(true);
             }}
             onCancel={() => {

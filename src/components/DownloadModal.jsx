@@ -585,6 +585,29 @@ export default function DownloadModal({
     }
   };
 
+  const sanitizeName = (name) =>
+    String(name || "video")
+      .replace(/[^a-zA-Z0-9._-]+/g, "_")
+      .replace(/^_+|_+$/g, "") || "video";
+
+  const handleWebDownload = async () => {
+    if (!m3u8Url) return;
+    setDownloadStatus("starting");
+    try {
+      const link = document.createElement("a");
+      link.href = m3u8Url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.download = `${sanitizeName(mediaName)}.m3u8`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setDownloadStatus("ok");
+    } catch {
+      setDownloadStatus("Unable to start browser download.");
+    }
+  };
+
   // ── No download path ───────────────────────────────────────────────────────
   if (!downloadPath || settingPath) {
     return (
@@ -1049,8 +1072,48 @@ export default function DownloadModal({
                 )}
               </div>
 
+              {!isElectron && (
+                <div className="download-ready">
+                  <div className="download-found-badge">✓ Web download mode</div>
+                  <div
+                    style={{
+                      marginBottom: 12,
+                      fontSize: 12,
+                      color: "var(--text2)",
+                      lineHeight: 1.6,
+                    }}
+                  >
+                    Mobile and browser fallback enabled. If your browser cannot
+                    directly save the stream, it will open the URL in a new tab.
+                  </div>
+                  {downloadStatus !== "ok" && (
+                    <button
+                      className="btn btn-primary"
+                      onClick={handleWebDownload}
+                      disabled={downloadStatus === "starting"}
+                      style={{ width: "100%", justifyContent: "center" }}
+                    >
+                      <DownloadIcon />
+                      {downloadStatus === "starting"
+                        ? "Opening..."
+                        : "Download In Browser"}
+                    </button>
+                  )}
+                  {downloadStatus === "ok" && (
+                    <div style={{ textAlign: "center", padding: "10px 0" }}>
+                      <div className="download-success">✓ Download opened.</div>
+                    </div>
+                  )}
+                  {downloadStatus &&
+                    downloadStatus !== "ok" &&
+                    downloadStatus !== "starting" && (
+                      <div className="download-error">{downloadStatus}</div>
+                    )}
+                </div>
+              )}
+
               {/* ── Downloader setup ──────────────────────────────────────── */}
-              {!downloader?.exists && (
+              {isElectron && !downloader?.exists && (
                 <div className="download-instructions">
                   <div className="download-instructions-title">
                     Set up Video Downloader
@@ -1130,7 +1193,7 @@ export default function DownloadModal({
                 </div>
               )}
 
-              {downloader?.exists && (
+              {isElectron && downloader?.exists && (
                 <div className="download-ready">
                   <div className="download-found-badge">
                     ✓ Video Downloader found
